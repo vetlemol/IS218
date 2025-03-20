@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strøm og strømnett i Norge</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { width: 100%; height: 100vh; }
+        .loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 1000;
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="loader" class="loader">Laster data...</div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <script>
+        // Oppretter kartet med senterpunkt i Norge
+        const map = L.map('map').setView([64.5, 11.5], 10);
+        
+        // Legger til bakgrunnskart
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+        
+        // Kobler til Supabase databasen. SupabaseURL og KEY finner dere på supabase --> Project settings --> Data API
+        const supabaseUrl = 'XXXX SUPABASE URL HER XXX';
+        const supabaseKey = 'XXXX LEGG INN KEY HER XXX';
+        const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+
+        // Funksjon for å hente transformatorstasjoner
+        async function hentTransformatorstasjoner() {
+            try {
+                const { data, error } = await supabase
+                    .from('transformatorgeojson') // Navn på view for trafo
+                    .select(`
+                        id,
+                        geojson 
+                    `); // Inni her legges info som skal hentes fra view
+
+                if (error) {
+                    console.error('Feil ved henting av transformatorstasjoner:', error);
+                    return;
+                }
+
+                console.log("Transformatorstasjoner mottatt:", data);
+
+                // Legg til transformatorstasjoner som røde sirkler
+                data.forEach(stasjon => {
+                    if (!stasjon.geojson) return;
+
+                    let geojson;
+                    try {
+                        geojson = JSON.parse(stasjon.geojson);
+                    } catch (e) {
+                        console.error(`Ugyldig GeoJSON for ID ${stasjon.id}:`, stasjon.geojson);
+                        return;
+                    }
+
+                    if (geojson.type === "Point") {
+                        const lat = geojson.coordinates[1];
+                        const lng = geojson.coordinates[0];
+
+
+                        L.circleMarker([lat, lng], {
+                            color: "red",
+                            radius: 3,
+                            fillOpacity: 0.8
+                        }).addTo(map)
+                                .bindPopup(
+                                    `<b>Transformatorstasjon</b><br>
+                                    <b>ID:</b> ${stasjon.id}`);
+                    }
+                });
+            } catch (error) {
+                console.error("Noe gikk galt med transformatorstasjoner:", error);
+            }
+        }
+
+        // Funksjon for å hente alle rader fra kraftnettgeojson
+async function hentAlleKraftnett() {
+    let allData = []; // Dette er lagt til fordi det er over 1000 rader som skal hentes, og supabase bare sender 1000 om gangen
+    let from = 0;
+    const batchSize = 1000; // Antall rader per batch
+
+    try {
+        while (true) {
+            const { data, error } = await supabase
+                .from('kraftnettgeojson')
+                .select(`
+                    id,
+                    navn,
+                    nettnivaa,
+                    nvenettnivaa,
+                    spenning_kv,
+                    geojson
+                `)
+                .range(from, from + batchSize - 1); // Hent en batch
+
+            if (error) {
+                console.error('Feil ved henting av kraftnett:', error);
+                break;
+            }
+
+            if (data.length === 0) {
+                // Ingen flere data å hente
+                break;
+            }
+
+            allData = allData.concat(data); // Legg til data i allData
+            from += batchSize; // Flytt til neste batch
+        }
+
+        console.log("Alle kraftnett mottatt:", allData);
+
+        // Legg til kraftnett som linjer med forskjellige farger basert på nvenettnivaa
+        allData.forEach(linje => {
+            if (!linje.geojson) return;
+
+            let geojson;
+            try {
+                geojson = JSON.parse(linje.geojson);
+            } catch (e) {
+                console.error(`Ugyldig GeoJSON for ID ${linje.id}:`, linje.geojson);
+                return;
+            }
+
+            // Velg farge basert på nvenettnivaa
+            const farge = linje.nvenettnivaa === 1 ? "red" : "blue"; // Skiller farge mellom regionalnett og sentralnett
+
+            L.geoJSON(geojson, {
+                style: {
+                    color: farge,
+                    weight: 2, // Tykkelse på linjen
+                    opacity: 0.8
+                }
+            }).addTo(map)
+                .bindPopup(`<b>Kraftnett</b><br>
+                            <b>Navn:</b> ${linje.navn} <br>
+                            <b>ID:</b> ${linje.id} <br>
+                            <b>Nettnivå:</b> ${linje.nettnivaa} <br>
+                            <b>Spenning (kV):</b> ${linje.spenning_kv}`);
+        });
+    } catch (error) {
+        console.error("Noe gikk galt med henting av kraftnett:", error);
+    }
+}
+
+
+
+        // Funksjon for å hente vannkraftverk
+        async function hentVannkraftverk() {
+            try {
+                const { data, error } = await supabase
+                    .from('vannkraftgeojson') // Navn på vannkraft View
+                    .select(`
+                        id,
+                        vannkraftverknavn,
+                        geojson
+                    `); // Her bør også info om hvor mye MW som blir produsert være med
+
+                if (error) {
+                    console.error('Feil ved henting av vannkraftverk:', error);
+                    return;
+                }
+
+                console.log("Vannkraftverk mottatt:", data);
+
+                // Legg til vannkraftverk som blå sirkler
+                data.forEach(kraftverk => {
+                    if (!kraftverk.geojson) return;
+
+                    let geojson;
+                    try {
+                        geojson = JSON.parse(kraftverk.geojson);
+                    } catch (e) {
+                        console.error(`Ugyldig GeoJSON for navn ${kraftverk.vannkraftverknavn}:`, kraftverk.geojson);
+                        return;
+                    }
+
+                    if (geojson.type === "Point") {
+                        const lat = geojson.coordinates[1];
+                        const lng = geojson.coordinates[0];
+
+                        L.circleMarker([lat, lng], {
+                            color: "blue",
+                            radius: 3,
+                            fillOpacity: 0.8
+                        }).addTo(map)
+                                .bindPopup(`<b>Vannkraftverk</b><br>
+                                            <b>Id:</b> ${kraftverk.id} <br>
+                                            <b>Vannkraftverk:</b> ${kraftverk.vannkraftverknavn}`);
+
+                        // const squareBounds = [
+                        //     [lat - 0.001, lng - 0.001], // Bottom-left corner
+                        //     [lat + 0, lng + 0.001]  // Top-right corner
+                        // ];
+
+                        // const square = L.rectangle(squareBounds, {
+                        //     color: "blue",
+                        //     weight: 1,
+                        //     fillOpacity: 0.8
+                        // }).addTo(map);
+
+                        // square.bindPopup(`<b>Vannkraftverk</b><br>
+                        //                   <b>Id:</b> ${kraftverk.id} <br>
+                        //                   <b>Vannkraftverk:</b> ${kraftverk.vannkraftverknavn}`);
+                    }
+                });
+            } catch (error) {
+                console.error("Noe gikk galt med vannkraftverk:", error);
+            }
+        }
+
+        // Funksjon for å hente vindkraftverk
+        async function hentVindkraftverk() {
+            try {
+                const { data, error } = await supabase
+                    .from('vindkraftutbygdgeojson') // Query vindkraftverk. Henter kun status 'D' (i drift) i view.
+                    .select(`
+                        id,
+                        sakstittel,
+                        effekt_mw,
+                        geojson
+                    `);
+
+                if (error) {
+                    console.error('Feil ved henting av vindkraftverk:', error);
+                    return;
+                }
+
+                console.log("Vindkraftverk mottatt:", data);
+
+                // Legg til vindkraftverk som punkter
+                data.forEach(kraftverk => {
+                    if (!kraftverk.geojson) return;
+
+                    let geojson;
+                    try {
+                        geojson = JSON.parse(kraftverk.geojson);
+                    } catch (e) {
+                        console.error(`Ugyldig GeoJSON for ID ${kraftverk.id}:`, kraftverk.geojson);
+                        return;
+                    }
+
+                    if (geojson.type === "Point") {
+                        const lat = geojson.coordinates[1];
+                        const lng = geojson.coordinates[0];
+
+                        let radius = 2;
+                        if (kraftverk.effekt_mw >= 150) {
+                            radius = 6;
+                        } else if (kraftverk.effekt_mw > 100) {
+                            radius = 4;
+                        } else if (kraftverk.effekt_mw > 50) {
+                            radius = 3;
+                        }
+
+                        L.circleMarker([lat, lng], {
+                            color: "green",
+                            radius: radius,
+                            fillOpacity: 0.8
+                        }).addTo(map)
+                            .bindPopup(`<b>Vindkraftverk</b><br>
+                                        <b>Id:</b> ${kraftverk.id} <br>
+                                        <b>Sakstittel:</b> ${kraftverk.sakstittel} <br>
+                                        <b>Effekt (MW):</b> ${kraftverk.effekt_mw}`);
+                    }
+                });
+            } catch (error) {
+                console.error("Noe gikk galt med vindkraftverk:", error);
+            }
+        }
+
+        // Funksjon for å hente vindkraftområder
+        async function hentVindkraftområder() {
+            try {
+                const { data, error } = await supabase
+                    .from('vindkraftomrgeojson') // Query vindkraftområder
+                    .select(`
+                        id,
+                        geojson
+                    `);
+                if (error) {
+                    console.error('Feil ved henting av vindkraftområder:', error);
+                    return;
+                }
+                console.log("Vindkraftområder mottatt:", data);
+                // Legg til vindkraftområder som polygoner uten fyll
+                data.forEach(område => {
+                    if (!område.geojson) return;
+                    let geojson;
+                    try {
+                        geojson = JSON.parse(område.geojson);
+                    } catch (e) {
+                        console.error(`Ugyldig GeoJSON for ID ${område.id}:`, område.geojson);
+                        return;
+                    }
+                    L.geoJSON(geojson, {
+                        style: {
+                            color: "orange", // Farge på kantene
+                            weight: 2,       // Tykkelse på kantene
+                            fillOpacity: 0   // Ingen fyll
+                        }
+                    }).addTo(map)
+                        .bindPopup(`<b>Vindkraftområde ID:</b> ${område.id}`);
+                });
+            } catch (error) {
+                console.error("Noe gikk galt med vindkraftområder:", error);
+            }
+        }
+
+
+        // Denne som bestemmer hvilke funksjoner som blir vist i kartet. Vindkraftområder er kommentert ut siden jeg ikke var fornøyd med hvordan det ble seende ut
+        async function hentOgVisData() {
+            await hentTransformatorstasjoner();
+            await hentVannkraftverk();
+            await hentVindkraftverk();
+            await hentAlleKraftnett();
+           // await hentVindkraftområder();
+
+            // Skjul loader når dataene er lastet
+            document.getElementById("loader").style.display = "none";
+        }
+
+        hentOgVisData();
+    </script>
+</body>
+</html>
